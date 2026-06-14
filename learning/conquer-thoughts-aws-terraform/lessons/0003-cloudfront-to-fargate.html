@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 0003 - CloudFront to Fargate</title>
+<style>
+  :root { --ink: #1b1b18; --paper: #fdfcf7; --accent: #7a2e12; --muted: #6f6b63; --line: #ded8c8; --code: #f3efe3; }
+  body { font-family: Georgia, "Times New Roman", serif; color: var(--ink); background: var(--paper); max-width: 39rem; margin: 0 auto; padding: 3rem 1.5rem 5rem; line-height: 1.65; font-size: 1.05rem; }
+  h1 { font-size: 1.9rem; line-height: 1.2; margin-bottom: 0.25rem; }
+  h2 { font-size: 1.25rem; margin-top: 2.4rem; }
+  a { color: var(--accent); }
+  .meta { color: var(--muted); font-size: 0.9rem; margin-bottom: 2rem; }
+  .mission { font-style: italic; color: var(--muted); }
+  .objective { border-left: 3px solid var(--accent); padding: 0.65rem 1rem; margin: 2rem 0; background: #faf6ea; }
+  code, pre { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.86em; }
+  pre { background: var(--code); padding: 1rem; overflow-x: auto; line-height: 1.45; border: 1px solid var(--line); }
+  table { border-collapse: collapse; width: 100%; font-size: 0.95rem; }
+  th, td { border-bottom: 1px solid var(--line); padding: 0.45rem 0.3rem; vertical-align: top; }
+  th { text-align: left; }
+  figure { margin: 2rem 0; }
+  figcaption { color: var(--muted); font-size: 0.85rem; margin-top: 0.5rem; }
+  .quiz li { margin-bottom: 1.2rem; }
+  .reading li { margin-bottom: 0.7rem; }
+  details summary { cursor: pointer; color: var(--accent); }
+  .source { background: #f4efe2; padding: 1rem 1.25rem; margin: 2rem 0; border: 1px solid var(--line); }
+  nav.lessons { display: flex; justify-content: space-between; gap: 1rem; font-size: 0.9rem; margin-top: 2rem; }
+  footer { margin-top: 3rem; padding-top: 1.5rem; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.9rem; }
+  @media print { body { max-width: none; padding: 0; } details summary { display: none; } nav.lessons, .follow-up { display: none; } pre, table, details { page-break-inside: avoid; } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>CloudFront to Fargate</h1>
+  <p class="meta">Lesson 0003 - Conquer Thoughts AWS/Terraform - 2026-06-14</p>
+  <p class="mission">Part of your mission to build a durable mental model of the Conquer Thoughts production walking skeleton so you can explain, debug, and safely extend the AWS/Terraform/GitHub Actions rail.</p>
+</header>
+
+<div class="objective">
+  <strong>After this lesson you'll be able to</strong> explain how CloudFront reaches private assets and an internal ALB without making the ALB public.
+</div>
+
+<h2>Concrete example: private S3, public website</h2>
+<p>
+The static web bundle lives in an S3 bucket with public access blocked, versioning enabled,
+and server-side encryption. CloudFront has an S3 origin configured with Origin Access Control.
+The bucket policy allows the CloudFront service principal to read objects only when the source
+ARN is this distribution. That is why the bucket can stay private while viewers still load the
+site through CloudFront.
+</p>
+
+<p>
+CloudFront's OAC docs recommend signing origin requests, and the project sets
+<code>signing_behavior = "always"</code> and <code>signing_protocol = "sigv4"</code> in the
+<code>static-edge</code> module
+(<a href="https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-restricting-access-to-s3.html">AWS OAC docs</a>).
+</p>
+
+<h2>Concrete example: private ALB, public API</h2>
+<p>
+The ALB is also not public. It is internal and sits in private subnets. CloudFront reaches it
+through a VPC origin. AWS says VPC origin resources can include Application Load Balancers,
+and when CloudFront creates a VPC origin it creates a service-managed security group named
+like <code>CloudFront-VPCOrigins-Service-SG</code>. The project discovers that security group
+and allows it to reach the ALB on port 80
+(<a href="https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-vpc-origins.html">AWS VPC origin docs</a>).
+</p>
+
+<p>
+From the ALB inward, the <code>web-service</code> module creates a target group, listener,
+Fargate task definition, ECS service, and task security group. The task security group allows
+inbound traffic only from the ALB security group on the container port. Day one tasks have
+public IPs for egress, but that is not public ingress: the security group still decides who
+can connect to the task.
+</p>
+
+<h2>The principle</h2>
+<p>
+Public entry and public origin are different ideas. The project wants a public product URL,
+not a public ALB. CloudFront is the public entry; S3 and ALB are origins with narrowly granted
+access. That preserves a simple external shape while shrinking the attack surface behind it.
+</p>
+
+<figure>
+<pre>Public internet
+  -> CloudFront
+       path: /
+         -> signed request to private S3 bucket
+
+       path: /api/* or /health
+         -> VPC origin
+            -> CloudFront service-managed security group
+               -> internal ALB security group
+                  -> ECS task security group
+                     -> container port 8787</pre>
+  <figcaption>Security groups define the private API path; OAC defines the private asset path.</figcaption>
+</figure>
+
+<h2>Why the route looks slightly odd</h2>
+<table>
+  <thead>
+    <tr><th>Choice</th><th>Trade-off accepted now</th><th>Future move</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Internal ALB behind CloudFront VPC origin</td>
+      <td>CloudFront/VPC-origin dependency ordering is more complex.</td>
+      <td>Keep one public front door; add custom domain/WAF later.</td>
+    </tr>
+    <tr>
+      <td>Fargate tasks in public subnets with public IPs</td>
+      <td>Open egress is accepted for day-one ECR pulls and runtime simplicity.</td>
+      <td>Move tasks private with NAT or VPC endpoints when dependencies are known.</td>
+    </tr>
+    <tr>
+      <td>CloudFront default certificate/domain</td>
+      <td>No branded domain yet.</td>
+      <td>Add Route 53/ACM/custom domain as its own Terraform slice.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>Reading and resources</h2>
+<ul class="reading">
+  <li><a href="https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-restricting-access-to-s3.html">CloudFront OAC for S3 origins</a> - use this for the private static asset path.</li>
+  <li><a href="https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-vpc-origins.html">CloudFront VPC origins</a> - use this for the private ALB/API origin path and the service-managed security group behavior.</li>
+  <li><a href="https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/DownloadDistS3AndCustomOrigins.html">CloudFront origin types</a> - use this to compare S3, ALB, NLB, EC2, API Gateway, and VPC origin choices.</li>
+  <li><a href="https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html">Application Load Balancer introduction</a> - use this for listeners, rules, target groups, and HTTP routing.</li>
+  <li><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/AWS_Fargate.html">AWS ECS Fargate</a> - use this for the runtime layer behind the ALB target group.</li>
+</ul>
+
+<h2>Check yourself</h2>
+<ol class="quiz">
+  <li>
+    What prevents a browser from reading the assets bucket directly?
+    <details><summary>Answer</summary><p>The bucket blocks public access, and the bucket policy grants read access to CloudFront through OAC for this distribution.</p></details>
+  </li>
+  <li>
+    What makes the ALB "internal" but still useful to the public site?
+    <details><summary>Answer</summary><p>The ALB is not internet-facing; CloudFront reaches it privately through a VPC origin.</p></details>
+  </li>
+  <li>
+    Why is a task public IP not the same as public ingress?
+    <details><summary>Answer</summary><p>Public IP gives the task outbound internet reachability, but inbound traffic is still controlled by its security group.</p></details>
+  </li>
+  <li>
+    If someone proposes opening the ALB to <code>0.0.0.0/0</code> for easier debugging, what project rule should you recall?
+    <details><summary>Answer</summary><p>CloudFront is the sole public ingress. Debug through CloudFront or automated in-VPC checks, not by opening the origin.</p></details>
+  </li>
+  <li>
+    Which earlier lesson connects to this one: Terraform state or walking skeleton scope?
+    <details><summary>Answer</summary><p>Both. The network/edge shape is the walking skeleton's public proof path, and Terraform state records which root owns each piece.</p></details>
+  </li>
+</ol>
+
+<div class="source">
+  <strong>Go deeper:</strong> <a href="https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-vpc-origins.html">Restrict access with VPC origins</a> -
+  this is the source to revisit before changing the internal ALB or CloudFront origin design.
+</div>
+
+<nav class="lessons">
+  <a href="./0002-terraform-roots-state-and-modules.html">Previous lesson</a>
+  <a href="./0004-github-oidc-to-aws.html">Next lesson</a>
+</nav>
+<p><a href="../cheat-sheet.md">Cheat sheet</a> - <a href="../glossary.md">Glossary</a></p>
+
+<footer class="follow-up">
+  Questions? Run <code>/teach-me conquer-thoughts-aws-terraform</code> - your tutor remembers where you left off.
+</footer>
+
+</body>
+</html>

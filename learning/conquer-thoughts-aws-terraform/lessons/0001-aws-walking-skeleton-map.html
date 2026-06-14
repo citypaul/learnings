@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 0001 - AWS Walking Skeleton Map</title>
+<style>
+  :root {
+    --ink: #1b1b18;
+    --paper: #fdfcf7;
+    --accent: #7a2e12;
+    --muted: #6f6b63;
+    --line: #ded8c8;
+    --code: #f3efe3;
+  }
+  body {
+    font-family: Georgia, "Times New Roman", serif;
+    color: var(--ink);
+    background: var(--paper);
+    max-width: 39rem;
+    margin: 0 auto;
+    padding: 3rem 1.5rem 5rem;
+    line-height: 1.65;
+    font-size: 1.05rem;
+  }
+  h1 { font-size: 1.9rem; line-height: 1.2; margin-bottom: 0.25rem; }
+  h2 { font-size: 1.25rem; margin-top: 2.4rem; }
+  h3 { font-size: 1.05rem; margin-top: 1.7rem; }
+  a { color: var(--accent); }
+  .meta { color: var(--muted); font-size: 0.9rem; margin-bottom: 2rem; }
+  .mission { font-style: italic; color: var(--muted); }
+  .objective {
+    border-left: 3px solid var(--accent);
+    padding: 0.65rem 1rem;
+    margin: 2rem 0;
+    background: #faf6ea;
+  }
+  code, pre { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.86em; }
+  pre {
+    background: var(--code);
+    padding: 1rem;
+    overflow-x: auto;
+    line-height: 1.45;
+    border: 1px solid var(--line);
+  }
+  table { border-collapse: collapse; width: 100%; font-size: 0.95rem; }
+  th, td { border-bottom: 1px solid var(--line); padding: 0.45rem 0.3rem; vertical-align: top; }
+  th { text-align: left; }
+  figure { margin: 2rem 0; }
+  figcaption { color: var(--muted); font-size: 0.85rem; margin-top: 0.5rem; }
+  .quiz li { margin-bottom: 1.2rem; }
+  .reading li { margin-bottom: 0.7rem; }
+  details summary { cursor: pointer; color: var(--accent); }
+  .source {
+    background: #f4efe2;
+    padding: 1rem 1.25rem;
+    margin: 2rem 0;
+    border: 1px solid var(--line);
+  }
+  nav.lessons { display: flex; justify-content: flex-end; font-size: 0.9rem; margin-top: 2rem; }
+  footer {
+    margin-top: 3rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--line);
+    color: var(--muted);
+    font-size: 0.9rem;
+  }
+  @media print {
+    body { max-width: none; padding: 0; }
+    details summary { display: none; }
+    nav.lessons, .follow-up { display: none; }
+    pre, table, details { page-break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>AWS Walking Skeleton Map</h1>
+  <p class="meta">Lesson 0001 - Conquer Thoughts AWS/Terraform - 2026-06-14</p>
+  <p class="mission">Part of your mission to build a durable mental model of the Conquer Thoughts production walking skeleton so you can explain, debug, and safely extend the AWS/Terraform/GitHub Actions rail.</p>
+</header>
+
+<div class="objective">
+  <strong>After this lesson you'll be able to</strong> trace the deployed request path and name the role of each AWS service in the first slice.
+</div>
+
+<h2>Concrete example: the browser asks the API for hello</h2>
+<p>
+In the current Dreamcatcher walking skeleton, the browser reaches one public thing: CloudFront.
+When the web app calls <code>/api/hello</code>, CloudFront routes that API path to an Application
+Load Balancer. The ALB is internal, not internet-facing, so CloudFront reaches it through a
+VPC origin. Behind the ALB is an ECS Fargate task running the Hono BFF container.
+AWS describes Fargate as a way to run ECS containers without managing EC2 instances or cluster
+capacity (<a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/AWS_Fargate.html">AWS ECS Fargate docs</a>).
+</p>
+
+<p>
+This is deliberately a walking skeleton: not the whole product, but a thin slice proving that
+the delivery path, container runtime, edge, health checks, and smoke proof can all work
+together. The project evidence is in <code>infra/terraform/production/main.tf</code>,
+<code>scripts/walking-skeleton/smoke.sh</code>, and the BFF routes in
+<code>apps/dreamcatcher-bff/src/app.ts</code>.
+</p>
+
+<h2>Concrete example: the browser asks for static assets</h2>
+<p>
+The Vite bundle is not served by the BFF container. It is uploaded to a private S3 bucket.
+CloudFront reads that bucket using Origin Access Control, so the bucket can block public
+access while still serving viewers through CloudFront. AWS recommends OAC over the older OAI
+mechanism because it supports newer regions, SSE-KMS, and dynamic S3 requests
+(<a href="https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-restricting-access-to-s3.html">AWS CloudFront OAC docs</a>).
+</p>
+
+<p>
+That split matters: the API can roll as a container, while the static shell can be published
+with S3 sync and CloudFront invalidation. The smoke test checks both halves: API build
+metadata and a marker inside the web bundle.
+</p>
+
+<h2>The principle</h2>
+<p>
+The first AWS slice is a proving path, not a maximal architecture. It proves that a reviewed
+commit can become a public HTTPS experience with no public ALB, no long-lived GitHub AWS
+keys, Terraform-owned infrastructure, and a smoke test that names the exact commit being served.
+Everything missing from the slice is missing on purpose: RDS, real identity, workers, custom
+domains, WAF, and secrets arrive only when they can be proven end to end.
+</p>
+
+<figure>
+<pre>Viewer
+  -> CloudFront distribution
+     -> S3 private assets bucket
+        (static Vite bundle through Origin Access Control)
+     -> CloudFront VPC origin
+        -> internal Application Load Balancer
+           -> ECS Fargate BFF task
+              -> /health, /api/hello, /api/build</pre>
+  <figcaption>The walking skeleton has one public front door and two origins: static assets and API.</figcaption>
+</figure>
+
+<h2>Service map</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Service</th>
+      <th>Job in this slice</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>CloudFront</td>
+      <td>Only public entry point; routes static and API paths.</td>
+    </tr>
+    <tr>
+      <td>S3 assets bucket</td>
+      <td>Private storage for the Vite bundle.</td>
+    </tr>
+    <tr>
+      <td>ALB</td>
+      <td>Internal HTTP origin for the API container.</td>
+    </tr>
+    <tr>
+      <td>ECS Fargate</td>
+      <td>Runs the API-only BFF as a container without managing EC2 nodes.</td>
+    </tr>
+    <tr>
+      <td>ECR</td>
+      <td>Stores the BFF image tagged with the git SHA.</td>
+    </tr>
+    <tr>
+      <td>CloudWatch/SNS/SQS</td>
+      <td>Minimal alarm path with a Terraform-owned SQS sink for proof.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>Reading and resources</h2>
+<ul class="reading">
+  <li><a href="https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/Introduction.html">AWS: What is Amazon CloudFront?</a> - use this for the edge, distribution, cache, and origin vocabulary behind the public front door.</li>
+  <li><a href="https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-restricting-access-to-s3.html">AWS CloudFront OAC docs</a> - use this for why the S3 assets bucket can stay private while CloudFront serves the web bundle.</li>
+  <li><a href="https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-vpc-origins.html">AWS CloudFront VPC origins</a> - use this for the private ALB path behind CloudFront.</li>
+  <li><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/AWS_Fargate.html">AWS ECS Fargate</a> - use this for the container runtime model without managed EC2 nodes.</li>
+  <li><a href="https://docs.aws.amazon.com/wellarchitected/latest/framework/welcome.html">AWS Well-Architected Framework</a> - use this for the broader tradeoffs behind a production-shaped walking skeleton.</li>
+</ul>
+
+<h2>Check yourself</h2>
+<ol class="quiz">
+  <li>
+    What is the only public entry point in the walking skeleton?
+    <details><summary>Answer</summary><p>CloudFront. The ALB is internal, and the S3 assets bucket is private behind OAC.</p></details>
+  </li>
+  <li>
+    Why is the web bundle not served directly by the BFF container?
+    <details><summary>Answer</summary><p>Static assets and API have different deployment and caching needs. S3 plus CloudFront handles the static bundle; ECS handles the API process.</p></details>
+  </li>
+  <li>
+    If a smoke test proves <code>/api/build</code> returns the expected commit SHA, what has it proven?
+    <details><summary>Answer</summary><p>It proves the deployed API task is running the image built from that commit, not merely that some service is healthy.</p></details>
+  </li>
+  <li>
+    Which future feature would force this slice to grow: real customer data, custom domain, or another proof marker?
+    <details><summary>Answer</summary><p>Real customer data. That introduces database, secrets, tenant isolation, backup, and restore concerns. A custom domain is also a future slice, but it is not required to prove the core rail.</p></details>
+  </li>
+  <li>
+    Explain the phrase "walking skeleton" in this project without naming any AWS service.
+    <details><summary>Answer</summary><p>It is the thinnest production-shaped path that proves code can move from a reviewed commit to a working public system with observable proof, while leaving deeper product capabilities for later slices.</p></details>
+  </li>
+</ol>
+
+<div class="source">
+  <strong>Go deeper:</strong> <a href="https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-vpc-origins.html">AWS CloudFront VPC origins</a> -
+  read this next to understand why the project chose a private ALB behind CloudFront instead of opening the ALB to the internet.
+</div>
+
+<nav class="lessons">
+  <a href="./0002-terraform-roots-state-and-modules.html">Next lesson - Terraform roots, state, and modules</a>
+</nav>
+<p><a href="../cheat-sheet.md">Cheat sheet</a> - <a href="../glossary.md">Glossary</a></p>
+
+<footer class="follow-up">
+  Questions? Run <code>/teach-me conquer-thoughts-aws-terraform</code> - your tutor remembers where you left off.
+</footer>
+
+</body>
+</html>

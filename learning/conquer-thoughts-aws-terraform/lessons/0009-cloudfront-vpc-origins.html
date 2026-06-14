@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 0009 - CloudFront VPC Origins</title>
+<style>
+  :root { --ink: #1b1b18; --paper: #fdfcf7; --accent: #7a2e12; --muted: #6f6b63; --line: #ded8c8; --code: #f3efe3; }
+  body { font-family: Georgia, "Times New Roman", serif; color: var(--ink); background: var(--paper); max-width: 39rem; margin: 0 auto; padding: 3rem 1.5rem 5rem; line-height: 1.65; font-size: 1.05rem; }
+  h1 { font-size: 1.9rem; line-height: 1.2; margin-bottom: 0.25rem; }
+  h2 { font-size: 1.25rem; margin-top: 2.4rem; }
+  a { color: var(--accent); }
+  .meta { color: var(--muted); font-size: 0.9rem; margin-bottom: 2rem; }
+  .mission { font-style: italic; color: var(--muted); }
+  .objective { border-left: 3px solid var(--accent); padding: 0.65rem 1rem; margin: 2rem 0; background: #faf6ea; }
+  code, pre { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.86em; }
+  pre { background: var(--code); padding: 1rem; overflow-x: auto; line-height: 1.45; border: 1px solid var(--line); }
+  table { border-collapse: collapse; width: 100%; font-size: 0.95rem; }
+  th, td { border-bottom: 1px solid var(--line); padding: 0.45rem 0.3rem; vertical-align: top; }
+  th { text-align: left; }
+  figure { margin: 2rem 0; }
+  figcaption { color: var(--muted); font-size: 0.85rem; margin-top: 0.5rem; }
+  .quiz li { margin-bottom: 1.2rem; }
+  .reading li { margin-bottom: 0.7rem; }
+  details summary { cursor: pointer; color: var(--accent); }
+  .source { background: #f4efe2; padding: 1rem 1.25rem; margin: 2rem 0; border: 1px solid var(--line); }
+  nav.lessons { display: flex; justify-content: space-between; gap: 1rem; font-size: 0.9rem; margin-top: 2rem; }
+  footer { margin-top: 3rem; padding-top: 1.5rem; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.9rem; }
+  @media print { body { max-width: none; padding: 0; } details summary { display: none; } nav.lessons, .follow-up { display: none; } pre, table, details { page-break-inside: avoid; } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>CloudFront VPC Origins</h1>
+  <p class="meta">Lesson 0009 - Conquer Thoughts AWS/Terraform - 2026-06-14</p>
+  <p class="mission">Part of your mission to build a durable mental model of the Conquer Thoughts production walking skeleton so you can explain, debug, and safely extend the AWS/Terraform/GitHub Actions rail.</p>
+</header>
+
+<div class="objective">
+  <strong>After this lesson you'll be able to</strong> explain how CloudFront reaches the internal ALB without making the ALB public.
+</div>
+
+<h2>Concrete example: CloudFront is the only public front door</h2>
+<p>
+The production architecture uses one CloudFront distribution for both static web assets and
+API routes. The default origin is the private S3 assets bucket through Origin Access Control.
+The API routes use a CloudFront VPC origin that points at the internal ALB.
+</p>
+
+<p>
+AWS describes VPC origins as a way to deliver content from origins inside a VPC, such as
+Application Load Balancers, Network Load Balancers, and EC2 instances in private subnets,
+while keeping CloudFront as the single public entry point
+(<a href="https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-vpc-origins.html">AWS CloudFront VPC origins docs</a>).
+</p>
+
+<h2>Concrete example: Terraform creates a private bridge</h2>
+<p>
+The static-edge module has four important pieces:
+</p>
+
+<table>
+  <thead>
+    <tr><th>Terraform piece</th><th>What it does</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>aws_cloudfront_vpc_origin.alb</code></td>
+      <td>Registers the internal ALB as a CloudFront VPC origin.</td>
+    </tr>
+    <tr>
+      <td><code>data.aws_security_group.cloudfront_vpc_origin</code></td>
+      <td>Finds the CloudFront-created service-managed security group named <code>CloudFront-VPCOrigins-Service-SG</code>.</td>
+    </tr>
+    <tr>
+      <td><code>aws_vpc_security_group_ingress_rule.cloudfront_to_alb</code></td>
+      <td>Allows inbound HTTP from that service-managed security group to the ALB security group.</td>
+    </tr>
+    <tr>
+      <td><code>aws_cloudfront_distribution.this</code></td>
+      <td>Routes <code>/api/*</code> and <code>/health</code> to the VPC origin; all other paths go to S3.</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>
+The ordering matters. The service-managed security group exists only after the VPC origin is
+created, so the data source depends on the VPC origin. Then the ALB ingress rule depends on
+that data source. Terraform is not just creating boxes here; it is encoding a dependency
+chain for a managed AWS networking feature.
+</p>
+
+<h2>The principle</h2>
+<p>
+A CloudFront VPC origin is not a public ALB with a secret header. It is a CloudFront-managed
+private path into your VPC. The ALB remains internal. The ALB security group allows traffic
+from CloudFront's service-managed security group. CloudFront then decides, by cache behavior,
+which URLs use that private API origin.
+</p>
+
+<figure>
+<pre>Viewer
+  -> CloudFront distribution
+     -> default behavior: S3 assets bucket through OAC
+     -> /api/* and /health:
+        CloudFront VPC origin
+          -> service-managed ENI and security group
+          -> ALB security group allows source SG on port 80
+          -> internal ALB
+          -> target group
+          -> Fargate BFF task</pre>
+  <figcaption>The public edge is CloudFront; the API origin stays inside the VPC.</figcaption>
+</figure>
+
+<h2>Subtle prerequisites and limits</h2>
+<p>
+AWS requires the VPC that contains the origin to have an internet gateway, but AWS also says
+that this internet gateway is not used for routing traffic to origins inside the subnet. The
+origin subnet must have available IPv4 addresses so CloudFront can create service-managed
+network interfaces. AWS also says the service-managed security group should not be edited
+directly; the origin's security group is where you allow traffic from it.
+</p>
+
+<p>
+There are feature limits to remember. AWS's VPC origin docs list unsupported features,
+including gRPC traffic and Lambda@Edge origin triggers for VPC origins. The project does not
+need those features for the walking skeleton, but they matter before treating VPC origins as
+a drop-in replacement for every CloudFront origin pattern.
+</p>
+
+<h2>Reading and resources</h2>
+<ul class="reading">
+  <li><a href="https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-vpc-origins.html">AWS CloudFront VPC origins</a> - the primary source for prerequisites, service-managed security groups, and feature restrictions.</li>
+  <li><a href="https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/DownloadDistS3AndCustomOrigins.html">CloudFront origin types</a> - use this to compare VPC origins with public ALB, S3, API Gateway, and other origin options.</li>
+  <li><a href="https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/controlling-origin-requests.html">CloudFront origin request policies</a> - use this before changing which headers, cookies, or query strings reach the API origin.</li>
+  <li><a href="https://docs.aws.amazon.com/vpc/latest/userguide/vpc-security-groups.html">AWS security groups</a> - use this for the ALB security-group rule that allows CloudFront's service-managed security group.</li>
+  <li><a href="https://developer.hashicorp.com/terraform/language/meta-arguments/depends_on">Terraform <code>depends_on</code></a> - use this for the dependency-ordering idea behind waiting for the CloudFront-created security group.</li>
+</ul>
+
+<h2>Check yourself</h2>
+<ol class="quiz">
+  <li>
+    What problem does a CloudFront VPC origin solve for this project?
+    <details><summary>Answer</summary><p>It lets CloudFront route API requests to an internal ALB without making the ALB directly public.</p></details>
+  </li>
+  <li>
+    Which security group should the project edit to permit CloudFront traffic?
+    <details><summary>Answer</summary><p>The ALB security group should allow inbound traffic from the CloudFront VPC origins service-managed security group. The service-managed security group itself should not be edited directly.</p></details>
+  </li>
+  <li>
+    Why does the Terraform data source for <code>CloudFront-VPCOrigins-Service-SG</code> depend on the VPC origin?
+    <details><summary>Answer</summary><p>Because CloudFront creates that service-managed security group as part of the VPC origin setup. Looking it up too early can fail.</p></details>
+  </li>
+  <li>
+    Does the VPC internet gateway carry CloudFront VPC origin traffic to the internal ALB?
+    <details><summary>Answer</summary><p>No. AWS requires the VPC to have an internet gateway, but says it is not used for routing traffic to origins inside the subnet.</p></details>
+  </li>
+  <li>
+    Which origin protects static assets: the VPC origin or Origin Access Control?
+    <details><summary>Answer</summary><p>Origin Access Control protects the private S3 assets bucket. The VPC origin is for the internal ALB/API path.</p></details>
+  </li>
+</ol>
+
+<div class="source">
+  <strong>Go deeper:</strong> <a href="https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-vpc-origins.html">AWS CloudFront VPC origins</a> -
+  read this before changing the ALB placement, security groups, cache behaviors, or supported origin features.
+</div>
+
+<nav class="lessons">
+  <a href="./0008-subnets-route-tables-public-private.html">Previous lesson</a>
+  <a href="./index.html">Lesson index</a>
+</nav>
+<p><a href="../cheat-sheet.md">Cheat sheet</a> - <a href="../glossary.md">Glossary</a></p>
+
+<footer class="follow-up">
+  Questions? Run <code>/teach-me conquer-thoughts-aws-terraform</code> - your tutor remembers where you left off.
+</footer>
+
+</body>
+</html>

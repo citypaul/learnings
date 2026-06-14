@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 0004 - GitHub OIDC to AWS</title>
+<style>
+  :root { --ink: #1b1b18; --paper: #fdfcf7; --accent: #7a2e12; --muted: #6f6b63; --line: #ded8c8; --code: #f3efe3; }
+  body { font-family: Georgia, "Times New Roman", serif; color: var(--ink); background: var(--paper); max-width: 39rem; margin: 0 auto; padding: 3rem 1.5rem 5rem; line-height: 1.65; font-size: 1.05rem; }
+  h1 { font-size: 1.9rem; line-height: 1.2; margin-bottom: 0.25rem; }
+  h2 { font-size: 1.25rem; margin-top: 2.4rem; }
+  a { color: var(--accent); }
+  .meta { color: var(--muted); font-size: 0.9rem; margin-bottom: 2rem; }
+  .mission { font-style: italic; color: var(--muted); }
+  .objective { border-left: 3px solid var(--accent); padding: 0.65rem 1rem; margin: 2rem 0; background: #faf6ea; }
+  code, pre { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.86em; }
+  pre { background: var(--code); padding: 1rem; overflow-x: auto; line-height: 1.45; border: 1px solid var(--line); }
+  table { border-collapse: collapse; width: 100%; font-size: 0.95rem; }
+  th, td { border-bottom: 1px solid var(--line); padding: 0.45rem 0.3rem; vertical-align: top; }
+  th { text-align: left; }
+  figure { margin: 2rem 0; }
+  figcaption { color: var(--muted); font-size: 0.85rem; margin-top: 0.5rem; }
+  .quiz li { margin-bottom: 1.2rem; }
+  .reading li { margin-bottom: 0.7rem; }
+  details summary { cursor: pointer; color: var(--accent); }
+  .source { background: #f4efe2; padding: 1rem 1.25rem; margin: 2rem 0; border: 1px solid var(--line); }
+  nav.lessons { display: flex; justify-content: space-between; gap: 1rem; font-size: 0.9rem; margin-top: 2rem; }
+  footer { margin-top: 3rem; padding-top: 1.5rem; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.9rem; }
+  @media print { body { max-width: none; padding: 0; } details summary { display: none; } nav.lessons, .follow-up { display: none; } pre, table, details { page-break-inside: avoid; } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>GitHub OIDC to AWS</h1>
+  <p class="meta">Lesson 0004 - Conquer Thoughts AWS/Terraform - 2026-06-14</p>
+  <p class="mission">Part of your mission to build a durable mental model of the Conquer Thoughts production walking skeleton so you can explain, debug, and safely extend the AWS/Terraform/GitHub Actions rail.</p>
+</header>
+
+<div class="objective">
+  <strong>After this lesson you'll be able to</strong> draw the OIDC token exchange from GitHub workflow to AWS STS credentials.
+</div>
+
+<h2>Concrete example: the workflow has no AWS access key</h2>
+<p>
+The deploy workflow has <code>permissions: id-token: write</code> and
+<code>contents: read</code>. GitHub's AWS OIDC guide says <code>id-token: write</code> lets the
+workflow request a JSON Web Token; it does not itself grant resource write permission
+(<a href="https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-aws">GitHub OIDC in AWS docs</a>).
+</p>
+
+<p>
+The workflow then runs <code>aws-actions/configure-aws-credentials</code> with a role ARN,
+region, account allow-list, and session name. That action asks GitHub for a signed identity
+token and asks AWS STS to exchange it for temporary AWS credentials. No long-lived
+<code>AWS_ACCESS_KEY_ID</code> or <code>AWS_SECRET_ACCESS_KEY</code> is stored in GitHub.
+</p>
+
+<h2>Concrete example: AWS has a front door for GitHub</h2>
+<p>
+AWS needs to know that it should trust tokens issued by GitHub. The account-level IAM OIDC
+provider represents <code>https://token.actions.githubusercontent.com</code>, and AWS's IAM docs
+describe OIDC identity providers as the object that establishes trust between an external
+issuer and an AWS account
+(<a href="https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_create_oidc.html">AWS OIDC provider docs</a>).
+</p>
+
+<h2>The missing piece: there is no shared secret</h2>
+<p>
+AWS does not verify GitHub's JWT with a password or a shared secret. GitHub signs the token
+with a private signing key. AWS discovers GitHub's public keys from GitHub's OIDC metadata
+and uses the matching public key to verify the signature. AWS's OIDC provider docs require
+the discovery document to include <code>jwks_uri</code>, the endpoint where IAM gets public
+keys used to verify signed tokens
+(<a href="https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_create_oidc.html">AWS OIDC provider docs</a>).
+</p>
+
+<p>
+GitHub publishes that discovery document at
+<code>https://token.actions.githubusercontent.com/.well-known/openid-configuration</code>.
+OpenID Connect Discovery defines this metadata pattern, including <code>jwks_uri</code>
+(<a href="https://openid.net/specs/openid-connect-discovery-1_0.html">OpenID Connect Discovery 1.0</a>).
+The JWT header includes fields such as <code>alg</code> and <code>kid</code>; GitHub's OIDC
+reference describes <code>kid</code> as the token's key identifier, and the JWS spec says
+<code>kid</code> is a hint for which key secured the signed object
+(<a href="https://docs.github.com/en/actions/reference/security/oidc">GitHub OIDC reference</a>,
+<a href="https://datatracker.ietf.org/doc/html/rfc7515">RFC 7515: JWS</a>).
+A signed JWT is not necessarily encrypted: AWS can read the claims, but it cannot forge or
+alter the token without breaking the signature.
+</p>
+
+<figure>
+<pre>GitHub OIDC issuer
+  private signing key: signs the JWT
+  public key set: published at jwks_uri
+
+GitHub Actions job
+  sends signed JWT to AWS STS
+
+AWS STS
+  reads token header kid
+  gets matching GitHub public key from JWKS
+  verifies signature
+  then evaluates iss, aud, sub, exp, and IAM trust conditions</pre>
+  <figcaption>Public keys verify who signed the token; IAM conditions decide whether that signed identity is allowed.</figcaption>
+</figure>
+
+<p>
+Trusting GitHub as an issuer is only the first gate. The IAM role trust policy then checks
+which GitHub workflow identity may assume the role. For this project, the deploy role accepts:
+</p>
+
+<pre>aud = sts.amazonaws.com
+sub = repo:citypaul/conquer-thoughts:ref:refs/heads/main</pre>
+
+<p>
+The audience says "this token is intended for AWS STS." The subject says "this exact
+repository and branch identity may deploy." AWS's GitHub OIDC role docs require a constrained
+<code>token.actions.githubusercontent.com:sub</code> condition rather than a missing, null, or
+wildcard-only subject
+(<a href="https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_create_for-idp_oidc.html">AWS role for GitHub OIDC docs</a>).
+</p>
+
+<h2>The principle</h2>
+<p>
+OIDC turns deployment identity into a short-lived proof instead of a stored secret. GitHub
+proves "this workflow run is from this repo/ref" by issuing a signed JWT. AWS first verifies
+the token's signature using GitHub's public keys, then checks the token claims against the
+role trust policy. Only then does AWS STS return temporary credentials, which the AWS CLI,
+Terraform, and Docker/ECR commands can use.
+</p>
+
+<figure>
+<pre>1. Workflow starts on main
+2. Workflow has permission to request an OIDC token
+3. GitHub OIDC issuer signs a JWT
+4. configure-aws-credentials sends JWT to AWS STS
+5. STS verifies the JWT signature using GitHub's public keys
+6. STS evaluates IAM role trust:
+     issuer: token.actions.githubusercontent.com
+     aud:    sts.amazonaws.com
+     sub:    repo:citypaul/conquer-thoughts:ref:refs/heads/main
+7. If trust matches, STS returns temporary AWS credentials
+8. Terraform and AWS CLI use those temporary credentials</pre>
+  <figcaption>The credential source is the workflow identity token, not a static AWS key.</figcaption>
+</figure>
+
+<h2>The four moving parts</h2>
+<table>
+  <thead>
+    <tr><th>Part</th><th>Question it answers</th><th>Project location</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Workflow permission</td>
+      <td>May this job request a GitHub OIDC token?</td>
+      <td><code>.github/workflows/deploy.yml</code></td>
+    </tr>
+    <tr>
+      <td>OIDC provider</td>
+      <td>Does AWS trust this issuer at all?</td>
+      <td><code>account-bootstrap/main.tf</code></td>
+    </tr>
+    <tr>
+      <td>Role trust policy</td>
+      <td>Which token shapes may enter this role?</td>
+      <td><code>bootstrap/main.tf</code></td>
+    </tr>
+    <tr>
+      <td>Role permissions</td>
+      <td>What may the role do after entry?</td>
+      <td><code>bootstrap/main.tf</code></td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>Reading and resources</h2>
+<ul class="reading">
+  <li><a href="https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-aws">GitHub: Configuring OIDC in AWS</a> - the practical setup path for <code>id-token: write</code>, <code>aud</code>, <code>sub</code>, and the AWS credentials action.</li>
+  <li><a href="https://docs.github.com/en/actions/reference/security/oidc">GitHub OIDC reference</a> - the claim and header reference, including <code>iss</code>, <code>aud</code>, <code>sub</code>, <code>exp</code>, and <code>kid</code>.</li>
+  <li><a href="https://token.actions.githubusercontent.com/.well-known/openid-configuration">GitHub OIDC discovery document</a> - the live metadata document AWS can use to discover GitHub's issuer metadata and public key set location.</li>
+  <li><a href="https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_create_oidc.html">AWS IAM OIDC provider docs</a> - the key source for <code>jwks_uri</code>, TLS/thumbprint handling, and how AWS retrieves public keys.</li>
+  <li><a href="https://openid.net/specs/openid-connect-discovery-1_0.html">OpenID Connect Discovery 1.0</a> - the protocol-level explanation of provider metadata and <code>jwks_uri</code>.</li>
+  <li><a href="https://datatracker.ietf.org/doc/html/rfc7515">RFC 7515: JSON Web Signature</a> and <a href="https://datatracker.ietf.org/doc/html/rfc7517">RFC 7517: JSON Web Key</a> - read these when you want the cryptographic shape behind signed JWTs and public key sets.</li>
+</ul>
+
+<h2>Check yourself</h2>
+<ol class="quiz">
+  <li>
+    What does <code>id-token: write</code> let a GitHub job do?
+    <details><summary>Answer</summary><p>Request a GitHub OIDC token for the run. It does not directly grant AWS permissions.</p></details>
+  </li>
+  <li>
+    Which AWS API turns the GitHub token into temporary credentials?
+    <details><summary>Answer</summary><p><code>AssumeRoleWithWebIdentity</code> through AWS STS. AWS documents that it returns temporary security credentials after validating the web identity token.</p></details>
+  </li>
+  <li>
+    How can AWS verify that GitHub signed the JWT without sharing a secret with GitHub?
+    <details><summary>Answer</summary><p>GitHub signs the token with a private key. AWS discovers GitHub's public keys through the OIDC discovery/JWKS endpoint and uses the matching public key to verify the JWT signature.</p></details>
+  </li>
+  <li>
+    Why does the deploy trust check both <code>aud</code> and <code>sub</code>?
+    <details><summary>Answer</summary><p><code>aud</code> confirms the token is intended for AWS STS; <code>sub</code> scopes the identity to the exact repository and branch shape.</p></details>
+  </li>
+  <li>
+    If the workflow uses a GitHub deployment environment later, what must change?
+    <details><summary>Answer</summary><p>The OIDC subject shape changes to an environment subject, so the IAM trust policy must be deliberately updated and the environment must have protection rules.</p></details>
+  </li>
+</ol>
+
+<div class="source">
+  <strong>Go deeper:</strong> <a href="https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_create_oidc.html">AWS IAM OIDC provider docs</a> -
+  read this for the exact discovery/JWKS mechanism AWS uses to find public keys for signed tokens.
+</div>
+
+<nav class="lessons">
+  <a href="./0003-cloudfront-to-fargate.html">Previous lesson</a>
+  <a href="./0005-iam-trust-permissions-and-oidc-fix.html">Next lesson</a>
+</nav>
+<p><a href="../cheat-sheet.md">Cheat sheet</a> - <a href="../glossary.md">Glossary</a></p>
+
+<footer class="follow-up">
+  Questions? Run <code>/teach-me conquer-thoughts-aws-terraform</code> - your tutor remembers where you left off.
+</footer>
+
+</body>
+</html>

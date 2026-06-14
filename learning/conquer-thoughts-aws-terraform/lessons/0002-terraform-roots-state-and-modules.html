@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 0002 - Terraform Roots, State, and Modules</title>
+<style>
+  :root { --ink: #1b1b18; --paper: #fdfcf7; --accent: #7a2e12; --muted: #6f6b63; --line: #ded8c8; --code: #f3efe3; }
+  body { font-family: Georgia, "Times New Roman", serif; color: var(--ink); background: var(--paper); max-width: 39rem; margin: 0 auto; padding: 3rem 1.5rem 5rem; line-height: 1.65; font-size: 1.05rem; }
+  h1 { font-size: 1.9rem; line-height: 1.2; margin-bottom: 0.25rem; }
+  h2 { font-size: 1.25rem; margin-top: 2.4rem; }
+  a { color: var(--accent); }
+  .meta { color: var(--muted); font-size: 0.9rem; margin-bottom: 2rem; }
+  .mission { font-style: italic; color: var(--muted); }
+  .objective { border-left: 3px solid var(--accent); padding: 0.65rem 1rem; margin: 2rem 0; background: #faf6ea; }
+  code, pre { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.86em; }
+  pre { background: var(--code); padding: 1rem; overflow-x: auto; line-height: 1.45; border: 1px solid var(--line); }
+  table { border-collapse: collapse; width: 100%; font-size: 0.95rem; }
+  th, td { border-bottom: 1px solid var(--line); padding: 0.45rem 0.3rem; vertical-align: top; }
+  th { text-align: left; }
+  figure { margin: 2rem 0; }
+  figcaption { color: var(--muted); font-size: 0.85rem; margin-top: 0.5rem; }
+  .quiz li { margin-bottom: 1.2rem; }
+  .reading li { margin-bottom: 0.7rem; }
+  details summary { cursor: pointer; color: var(--accent); }
+  .source { background: #f4efe2; padding: 1rem 1.25rem; margin: 2rem 0; border: 1px solid var(--line); }
+  nav.lessons { display: flex; justify-content: space-between; gap: 1rem; font-size: 0.9rem; margin-top: 2rem; }
+  footer { margin-top: 3rem; padding-top: 1.5rem; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.9rem; }
+  @media print { body { max-width: none; padding: 0; } details summary { display: none; } nav.lessons, .follow-up { display: none; } pre, table, details { page-break-inside: avoid; } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Terraform Roots, State, and Modules</h1>
+  <p class="meta">Lesson 0002 - Conquer Thoughts AWS/Terraform - 2026-06-14</p>
+  <p class="mission">Part of your mission to build a durable mental model of the Conquer Thoughts production walking skeleton so you can explain, debug, and safely extend the AWS/Terraform/GitHub Actions rail.</p>
+</header>
+
+<div class="objective">
+  <strong>After this lesson you'll be able to</strong> explain why the repo has `account-bootstrap`, `bootstrap`, `production`, and reusable modules.
+</div>
+
+<h2>Concrete example: the chicken-and-egg root</h2>
+<p>
+The deploy pipeline needs an IAM role before it can call AWS. Terraform also needs somewhere
+safe to store state before teams or workflows can collaborate. That is why
+<code>infra/terraform/bootstrap</code> exists: it creates the state bucket, the deploy and
+plan roles, state-access policies, and the ECR repository that the first image push needs.
+</p>
+
+<p>
+Terraform state is not a log of commands; it is Terraform's binding between configuration
+addresses and real remote objects. HashiCorp describes state as the mapping Terraform uses to
+connect resource instances in configuration to real infrastructure objects
+(<a href="https://developer.hashicorp.com/terraform/language/state">Terraform state docs</a>).
+If that mapping is lost or split across laptops, Terraform cannot safely reason about what it owns.
+</p>
+
+<h2>Concrete example: the account singleton</h2>
+<p>
+AWS allows the GitHub OIDC provider for <code>token.actions.githubusercontent.com</code> to be
+an account-level trust object. The project extracted it into
+<code>infra/terraform/account-bootstrap</code> so rehearsal and production bootstrap roots do
+not fight over the same singleton. The helper script creates or imports that provider, then
+migrates its state to S3 after the bucket exists.
+</p>
+
+<p>
+The <code>bootstrap</code> root now reads that provider as data and creates environment-shaped
+roles around it. The <code>removed</code> block in bootstrap is a state-management move: forget
+the old environment-owned provider address without destroying the real account singleton.
+</p>
+
+<h2>The principle</h2>
+<p>
+Terraform layout is ownership design. A root module is a lifecycle boundary: apply it, store
+its state, and decide who is allowed to run it. A child module is an abstraction boundary:
+compose a higher-level architectural thing from lower-level provider resources. HashiCorp's
+module guidance says good modules raise the level of abstraction and warns against thin
+wrappers around single resources
+(<a href="https://developer.hashicorp.com/terraform/language/modules/develop">Terraform module docs</a>).
+</p>
+
+<figure>
+<pre>infra/terraform/
+  account-bootstrap/
+    owns: account-level GitHub OIDC provider
+    state: account/github-oidc-provider.tfstate
+
+  bootstrap/
+    owns: state bucket, ECR, GitHub deploy/plan roles
+    state: bootstrap/terraform.tfstate
+
+  production/
+    owns: VPC, ALB, ECS, CloudFront, assets, alarms
+    state: production/terraform.tfstate
+
+  modules/
+    network, web-service, static-edge</pre>
+  <figcaption>Each root has a different lifecycle; modules describe reusable building blocks.</figcaption>
+</figure>
+
+<h2>Terraform vocabulary in this project</h2>
+<table>
+  <thead>
+    <tr><th>Construct</th><th>Project example</th><th>Why it matters</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>resource</code></td><td><code>aws_ecr_repository.bff</code></td><td>Creates or manages real infrastructure.</td></tr>
+    <tr><td><code>data</code></td><td><code>aws_caller_identity.current</code></td><td>Reads existing information without owning it.</td></tr>
+    <tr><td><code>local</code></td><td><code>github_main_subject_pattern</code></td><td>Names derived values once, then reuses them.</td></tr>
+    <tr><td><code>variable</code></td><td><code>image_tag</code></td><td>Turns the deploy artifact into an explicit input.</td></tr>
+    <tr><td><code>output</code></td><td><code>cloudfront_url</code></td><td>Passes useful facts to scripts and operators.</td></tr>
+    <tr><td><code>backend</code></td><td>S3 with <code>use_lockfile = true</code></td><td>Stores shared state and locks operations.</td></tr>
+  </tbody>
+</table>
+
+<h2>Remote state and lockfiles</h2>
+<p>
+The S3 backend stores state at a key inside a bucket and supports state locking when
+<code>use_lockfile = true</code>. HashiCorp also recommends enabling bucket versioning so state
+can be recovered after accidental deletion or human error
+(<a href="https://developer.hashicorp.com/terraform/language/backend/s3">Terraform S3 backend docs</a>).
+That is why the project state bucket has versioning, encryption, public access blocking, and
+native lockfiles.
+</p>
+
+<h2>Reading and resources</h2>
+<ul class="reading">
+  <li><a href="https://developer.hashicorp.com/terraform/language/state">Terraform state</a> - the primary source for why each Terraform root is really a state ownership boundary.</li>
+  <li><a href="https://developer.hashicorp.com/terraform/language/backend/s3">Terraform S3 backend</a> - use this for S3 state storage, lockfiles, backend credentials, and required backend permissions.</li>
+  <li><a href="https://developer.hashicorp.com/terraform/language/modules/develop">Terraform: Creating modules</a> - use this to judge when a module raises abstraction versus becoming a thin wrapper.</li>
+  <li><a href="https://developer.hashicorp.com/terraform/language/meta-arguments/depends_on">Terraform <code>depends_on</code></a> - useful later when the CloudFront VPC origin lesson explains explicit dependency edges.</li>
+  <li><a href="https://developer.hashicorp.com/well-architected-framework">HashiCorp Well-Architected Framework</a> - a useful broader guide for repeatable infrastructure workflows and security lifecycle thinking.</li>
+</ul>
+
+<h2>Check yourself</h2>
+<ol class="quiz">
+  <li>
+    Which root owns the GitHub OIDC provider singleton?
+    <details><summary>Answer</summary><p><code>account-bootstrap</code>. It keeps the account-level provider out of environment teardown.</p></details>
+  </li>
+  <li>
+    Why does <code>bootstrap</code> exist instead of letting the GitHub deploy workflow create everything?
+    <details><summary>Answer</summary><p>The workflow needs an IAM role, ECR repository, and remote state before its first deploy can safely run.</p></details>
+  </li>
+  <li>
+    What is the difference between a root module and a child module in this repo?
+    <details><summary>Answer</summary><p>A root module is applied and stateful as its own lifecycle. A child module is called by a root to package reusable infrastructure concepts.</p></details>
+  </li>
+  <li>
+    Why is state migration from local to S3 not optional housekeeping?
+    <details><summary>Answer</summary><p>If state stays local, future applies, destroys, or imports cannot reliably see what Terraform already owns.</p></details>
+  </li>
+  <li>
+    A future PR wants to add a module that wraps exactly one <code>aws_s3_bucket</code>. What should you ask?
+    <details><summary>Answer</summary><p>Ask what architectural concept the module names. If it is only a thin wrapper with no higher-level meaning, direct resource use may be clearer.</p></details>
+  </li>
+</ol>
+
+<div class="source">
+  <strong>Go deeper:</strong> <a href="https://developer.hashicorp.com/terraform/language/state">Terraform state</a> -
+  read this to anchor why every root boundary in the project is really a state ownership boundary.
+</div>
+
+<nav class="lessons">
+  <a href="./0001-aws-walking-skeleton-map.html">Previous lesson</a>
+  <a href="./0003-cloudfront-to-fargate.html">Next lesson</a>
+</nav>
+<p><a href="../cheat-sheet.md">Cheat sheet</a> - <a href="../glossary.md">Glossary</a></p>
+
+<footer class="follow-up">
+  Questions? Run <code>/teach-me conquer-thoughts-aws-terraform</code> - your tutor remembers where you left off.
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 0008 - Subnets, Route Tables, and Public versus Private</title>
+<style>
+  :root { --ink: #1b1b18; --paper: #fdfcf7; --accent: #7a2e12; --muted: #6f6b63; --line: #ded8c8; --code: #f3efe3; }
+  body { font-family: Georgia, "Times New Roman", serif; color: var(--ink); background: var(--paper); max-width: 39rem; margin: 0 auto; padding: 3rem 1.5rem 5rem; line-height: 1.65; font-size: 1.05rem; }
+  h1 { font-size: 1.9rem; line-height: 1.2; margin-bottom: 0.25rem; }
+  h2 { font-size: 1.25rem; margin-top: 2.4rem; }
+  a { color: var(--accent); }
+  .meta { color: var(--muted); font-size: 0.9rem; margin-bottom: 2rem; }
+  .mission { font-style: italic; color: var(--muted); }
+  .objective { border-left: 3px solid var(--accent); padding: 0.65rem 1rem; margin: 2rem 0; background: #faf6ea; }
+  code, pre { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.86em; }
+  pre { background: var(--code); padding: 1rem; overflow-x: auto; line-height: 1.45; border: 1px solid var(--line); }
+  table { border-collapse: collapse; width: 100%; font-size: 0.95rem; }
+  th, td { border-bottom: 1px solid var(--line); padding: 0.45rem 0.3rem; vertical-align: top; }
+  th { text-align: left; }
+  figure { margin: 2rem 0; }
+  figcaption { color: var(--muted); font-size: 0.85rem; margin-top: 0.5rem; }
+  .quiz li { margin-bottom: 1.2rem; }
+  .reading li { margin-bottom: 0.7rem; }
+  details summary { cursor: pointer; color: var(--accent); }
+  .source { background: #f4efe2; padding: 1rem 1.25rem; margin: 2rem 0; border: 1px solid var(--line); }
+  nav.lessons { display: flex; justify-content: space-between; gap: 1rem; font-size: 0.9rem; margin-top: 2rem; }
+  footer { margin-top: 3rem; padding-top: 1.5rem; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.9rem; }
+  @media print { body { max-width: none; padding: 0; } details summary { display: none; } nav.lessons, .follow-up { display: none; } pre, table, details { page-break-inside: avoid; } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Subnets, Route Tables, and Public versus Private</h1>
+  <p class="meta">Lesson 0008 - Conquer Thoughts AWS/Terraform - 2026-06-14</p>
+  <p class="mission">Part of your mission to build a durable mental model of the Conquer Thoughts production walking skeleton so you can explain, debug, and safely extend the AWS/Terraform/GitHub Actions rail.</p>
+</header>
+
+<div class="objective">
+  <strong>After this lesson you'll be able to</strong> classify a subnet as public or private by reading its route table, not by guessing from its name.
+</div>
+
+<h2>Concrete example: the public task subnets have an internet route</h2>
+<p>
+The network module creates an internet gateway and a public route table. The key route is:
+</p>
+
+<pre>destination_cidr_block = "0.0.0.0/0"
+gateway_id             = aws_internet_gateway.this.id</pre>
+
+<p>
+That route says "for IPv4 destinations outside the VPC, send traffic to the internet
+gateway." The module associates this route table with the public subnet IDs. The public
+subnets also have <code>map_public_ip_on_launch = true</code>, and the ECS service explicitly
+assigns public IPs for the BFF tasks. This gives the day-one Fargate service a simple egress
+path for image pulls and runtime calls without first introducing NAT gateways or VPC
+endpoints.
+</p>
+
+<h2>Concrete example: the private origin subnets do not have that route</h2>
+<p>
+The private route table in the module has no explicit <code>0.0.0.0/0</code> route to the
+internet gateway. It only has the implicit local VPC route that AWS provides. The internal
+ALB is placed in those private origin subnets, so the ALB has VPC-local reachability but no
+direct public internet path.
+</p>
+
+<p>
+AWS's subnet docs define the practical rule: if a subnet's route table has a route to an
+internet gateway, it is a public subnet; if it does not, it is a private subnet
+(<a href="https://docs.aws.amazon.com/vpc/latest/userguide/configure-subnets.html">AWS subnet docs</a>).
+The internet gateway docs add the subtle bit: a subnet without an internet-gateway route
+cannot communicate directly with the internet, even if an instance in it has a public IPv4
+address (<a href="https://docs.aws.amazon.com/vpc/latest/userguide/VPC_Internet_Gateway.html">AWS internet gateway docs</a>).
+</p>
+
+<h2>The principle</h2>
+<p>
+"Public" and "private" are routing outcomes. They are not special AWS subnet types, and
+they are not created by a name tag. A route table is a list of destination CIDR blocks and
+targets; AWS uses the most specific matching route to decide where traffic goes
+(<a href="https://docs.aws.amazon.com/vpc/latest/userguide/VPC_Route_Tables.html">AWS route table docs</a>).
+</p>
+
+<figure>
+<pre>Public task subnet
+  route table:
+    10.42.0.0/16 -> local
+    0.0.0.0/0    -> internet gateway
+  task ENI:
+    assign_public_ip = true
+
+Private origin subnet
+  route table:
+    10.42.0.0/16 -> local
+  internal ALB:
+    reached by CloudFront VPC origin, not public internet routing</pre>
+  <figcaption>The route table decides whether the subnet has a direct internet path.</figcaption>
+</figure>
+
+<h2>Security groups are the next gate</h2>
+<p>
+Routing answers "where can packets go?" Security groups answer "which packets are allowed
+into or out of this resource?" AWS security groups are stateful resource-level firewalls
+(<a href="https://docs.aws.amazon.com/vpc/latest/userguide/vpc-security-groups.html">AWS security group docs</a>).
+In this project, route tables make the ALB private, and security groups then make the ALB
+accept HTTP only from the CloudFront VPC origin service-managed security group.
+</p>
+
+<table>
+  <thead>
+    <tr><th>Question</th><th>Project answer</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>What makes the task subnets public?</td>
+      <td>Their route table has <code>0.0.0.0/0 -> internet gateway</code>.</td>
+    </tr>
+    <tr>
+      <td>What makes the origin subnets private?</td>
+      <td>Their route table has no direct internet-gateway route.</td>
+    </tr>
+    <tr>
+      <td>What protects the internal ALB after routing?</td>
+      <td>The ALB security group only allows inbound traffic from CloudFront's VPC origin service-managed security group.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>Reading and resources</h2>
+<ul class="reading">
+  <li><a href="https://docs.aws.amazon.com/vpc/latest/userguide/configure-subnets.html">AWS subnets for your VPC</a> - use this for public/private subnet classification and Availability Zone scope.</li>
+  <li><a href="https://docs.aws.amazon.com/vpc/latest/userguide/VPC_Route_Tables.html">AWS route tables</a> - use this for destination-plus-target routing and subnet associations.</li>
+  <li><a href="https://docs.aws.amazon.com/vpc/latest/userguide/VPC_Internet_Gateway.html">AWS internet gateways</a> - use this for the exact rule that a public subnet has an internet-gateway route.</li>
+  <li><a href="https://docs.aws.amazon.com/vpc/latest/userguide/vpc-security-groups.html">AWS security groups</a> - use this for stateful resource-level traffic controls after routing allows a path.</li>
+  <li><a href="https://docs.aws.amazon.com/vpc/latest/reachability/what-is-reachability-analyzer.html">AWS VPC Reachability Analyzer</a> - use this when you want AWS to explain which route table, security group, network ACL, or load balancer blocks a path.</li>
+</ul>
+
+<h2>Check yourself</h2>
+<ol class="quiz">
+  <li>
+    What is the single fastest way to tell whether an AWS subnet is public?
+    <details><summary>Answer</summary><p>Inspect the subnet's associated route table for a route to an internet gateway, usually <code>0.0.0.0/0 -> igw-...</code>.</p></details>
+  </li>
+  <li>
+    Does <code>map_public_ip_on_launch = true</code> alone make a subnet public?
+    <details><summary>Answer</summary><p>No. Public IP assignment matters, but the route table still needs an internet-gateway route for direct internet communication.</p></details>
+  </li>
+  <li>
+    Why are the BFF tasks placed in public subnets in the current walking skeleton?
+    <details><summary>Answer</summary><p>It gives the day-one Fargate tasks simple outbound internet access without NAT gateways or VPC endpoints.</p></details>
+  </li>
+  <li>
+    Why is the ALB placed in private origin subnets?
+    <details><summary>Answer</summary><p>The public entry point is CloudFront. The ALB should be reachable through the CloudFront VPC origin path, not directly from the internet.</p></details>
+  </li>
+  <li>
+    If CloudFront cannot reach the internal ALB, what are the first network checks?
+    <details><summary>Answer</summary><p>Check the CloudFront VPC origin status, available private subnet IPs, the ALB security-group ingress from <code>CloudFront-VPCOrigins-Service-SG</code>, and the CloudFront distribution's origin behavior.</p></details>
+  </li>
+</ol>
+
+<div class="source">
+  <strong>Go deeper:</strong> <a href="https://docs.aws.amazon.com/vpc/latest/userguide/VPC_Route_Tables.html">AWS route tables</a> -
+  read this any time a subnet's behavior is surprising; the route table usually tells the truth.
+</div>
+
+<nav class="lessons">
+  <a href="./0007-vpcs-and-cidr-blocks.html">Previous lesson</a>
+  <a href="./0009-cloudfront-vpc-origins.html">Next lesson</a>
+</nav>
+<p><a href="../cheat-sheet.md">Cheat sheet</a> - <a href="../glossary.md">Glossary</a></p>
+
+<footer class="follow-up">
+  Questions? Run <code>/teach-me conquer-thoughts-aws-terraform</code> - your tutor remembers where you left off.
+</footer>
+
+</body>
+</html>

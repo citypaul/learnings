@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 0006 - Deployment Rail, Provenance, and Guardrails</title>
+<style>
+  :root { --ink: #1b1b18; --paper: #fdfcf7; --accent: #7a2e12; --muted: #6f6b63; --line: #ded8c8; --code: #f3efe3; }
+  body { font-family: Georgia, "Times New Roman", serif; color: var(--ink); background: var(--paper); max-width: 39rem; margin: 0 auto; padding: 3rem 1.5rem 5rem; line-height: 1.65; font-size: 1.05rem; }
+  h1 { font-size: 1.9rem; line-height: 1.2; margin-bottom: 0.25rem; }
+  h2 { font-size: 1.25rem; margin-top: 2.4rem; }
+  a { color: var(--accent); }
+  .meta { color: var(--muted); font-size: 0.9rem; margin-bottom: 2rem; }
+  .mission { font-style: italic; color: var(--muted); }
+  .objective { border-left: 3px solid var(--accent); padding: 0.65rem 1rem; margin: 2rem 0; background: #faf6ea; }
+  code, pre { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.86em; }
+  pre { background: var(--code); padding: 1rem; overflow-x: auto; line-height: 1.45; border: 1px solid var(--line); }
+  table { border-collapse: collapse; width: 100%; font-size: 0.95rem; }
+  th, td { border-bottom: 1px solid var(--line); padding: 0.45rem 0.3rem; vertical-align: top; }
+  th { text-align: left; }
+  figure { margin: 2rem 0; }
+  figcaption { color: var(--muted); font-size: 0.85rem; margin-top: 0.5rem; }
+  .quiz li { margin-bottom: 1.2rem; }
+  .reading li { margin-bottom: 0.7rem; }
+  details summary { cursor: pointer; color: var(--accent); }
+  .source { background: #f4efe2; padding: 1rem 1.25rem; margin: 2rem 0; border: 1px solid var(--line); }
+  nav.lessons { display: flex; justify-content: flex-start; gap: 1rem; font-size: 0.9rem; margin-top: 2rem; }
+  footer { margin-top: 3rem; padding-top: 1.5rem; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.9rem; }
+  @media print { body { max-width: none; padding: 0; } details summary { display: none; } nav.lessons, .follow-up { display: none; } pre, table, details { page-break-inside: avoid; } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Deployment Rail, Provenance, and Guardrails</h1>
+  <p class="meta">Lesson 0006 - Conquer Thoughts AWS/Terraform - 2026-06-14</p>
+  <p class="mission">Part of your mission to build a durable mental model of the Conquer Thoughts production walking skeleton so you can explain, debug, and safely extend the AWS/Terraform/GitHub Actions rail.</p>
+</header>
+
+<div class="objective">
+  <strong>After this lesson you'll be able to</strong> explain the deploy workflow from checked-out SHA to smoke-tested CloudFront URL.
+</div>
+
+<h2>Concrete example: manual dispatch is not arbitrary promotion</h2>
+<p>
+The deploy workflow runs on pushes to <code>main</code> and also supports manual dispatch with
+a full commit SHA. But the dispatch is still fenced: the SHA must be a full lowercase
+40-character Git SHA and must be reachable from <code>origin/main</code>. The workflow detaches
+at that exact commit before building. This turns manual dispatch into a redeploy of known
+mainline code, not a side channel for unreviewed code.
+</p>
+
+<p>
+The workflow also pins third-party actions to commit SHAs. That reduces supply-chain drift:
+the action code used by deployment is not silently whatever a mutable tag points to tomorrow.
+</p>
+
+<h2>Concrete example: the image carries its own receipt</h2>
+<p>
+The BFF Dockerfile accepts build args for <code>BUILD_COMMIT_SHA</code>,
+<code>BUILD_CREATED_AT</code>, and <code>BUILD_IMAGE_TAG</code>. The publish script builds an
+ARM64 image and tags it with the first 12 characters of the deploy SHA. The BFF exposes
+<code>/api/build</code>, and the smoke test asserts that the deployed response matches the
+expected commit and image tag.
+</p>
+
+<p>
+The ECR repository is configured with immutable tags. AWS ECR documents that immutable tags
+cannot be overwritten; pushing an existing tag returns an error
+(<a href="https://docs.aws.amazon.com/AmazonECR/latest/userguide/image-tag-mutability.html">AWS ECR tag immutability docs</a>).
+That is useful because a git-SHA tag should identify one artifact, not drift over time.
+</p>
+
+<h2>The principle</h2>
+<p>
+The rail is designed so every important claim has proof. The commit check proves the source.
+The image tag and build metadata prove the container. Terraform's <code>image_tag</code>
+variable makes the deploy an apply, not a side-channel ECS update. The web bundle marker
+proves static publishing. The smoke test proves the public edge is serving the expected API
+and shell.
+</p>
+
+<figure>
+<pre>push to main
+  -> checkout exact commit
+  -> install Node, pnpm, Terraform
+  -> assume AWS role with GitHub OIDC
+  -> configure bootstrap remote state
+  -> build and push BFF image to ECR
+  -> terraform apply production with image_tag
+  -> build and sync web bundle to S3
+  -> invalidate CloudFront
+  -> smoke CloudFront URL, API build metadata, web marker, alarm sink</pre>
+  <figcaption>The deployment rail is a chain of proofs, not just a chain of commands.</figcaption>
+</figure>
+
+<h2>Guardrails to remember</h2>
+<table>
+  <thead>
+    <tr><th>Guardrail</th><th>What it prevents</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>USE_AWS_PROFILE=false</code> in GitHub</td>
+      <td>Prevents scripts from looking for workstation credentials in CI.</td>
+    </tr>
+    <tr>
+      <td>Allowed AWS account check</td>
+      <td>Prevents deploys into the wrong account.</td>
+    </tr>
+    <tr>
+      <td>Production/rehearsal shape checks</td>
+      <td>Prevents a production apply with destructive rehearsal inputs.</td>
+    </tr>
+    <tr>
+      <td>GitHub Actions concurrency group</td>
+      <td>Queues deploys so two applies do not race the same state.</td>
+    </tr>
+    <tr>
+      <td>ECS deployment circuit breaker</td>
+      <td>Rolls back a failed rolling deployment to the previous completed deployment. AWS documents this rollback behavior for ECS services using the circuit breaker (<a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/deployment-circuit-breaker.html">AWS ECS circuit breaker docs</a>).</td>
+    </tr>
+    <tr>
+      <td>Smoke checks</td>
+      <td>Turns "it deployed" into "the expected commit is serving through CloudFront."</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>Static asset ordering</h2>
+<p>
+The API deploy goes through Terraform, but static assets are published by script. The current
+publish script syncs fingerprinted assets with long cache headers, syncs the rest with
+<code>no-store</code>, and creates a CloudFront invalidation. The smoke test then reads the web
+root, finds the JavaScript bundle, and checks that the bundle contains the deploy proof marker.
+That keeps the static side honest even though it is not Terraform state.
+</p>
+
+<h2>Reading and resources</h2>
+<ul class="reading">
+  <li><a href="https://docs.github.com/en/actions/reference/security/secure-use">GitHub Actions secure use reference</a> - use this for workflow hardening, untrusted input, third-party actions, and runner safety.</li>
+  <li><a href="https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax">GitHub Actions workflow syntax</a> - use this for triggers, permissions, concurrency, and manual dispatch rules.</li>
+  <li><a href="https://docs.aws.amazon.com/AmazonECR/latest/userguide/image-tag-mutability.html">AWS ECR image tag immutability</a> - use this for why a git-SHA image tag should not drift.</li>
+  <li><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/deployment-type-ecs.html">AWS ECS rolling deployments</a> - use this for how ECS replaces tasks and resolves image tags to digests.</li>
+  <li><a href="https://docs.aws.amazon.com/wellarchitected/latest/operational-excellence-pillar/welcome.html">AWS Well-Architected Operational Excellence Pillar</a> - use this for the broader discipline behind repeatable deploy rails and operational proof.</li>
+</ul>
+
+<h2>Check yourself</h2>
+<ol class="quiz">
+  <li>
+    Why does the workflow require a full 40-character SHA for manual dispatch?
+    <details><summary>Answer</summary><p>It avoids ambiguous or moving references and forces the deploy to name an exact commit.</p></details>
+  </li>
+  <li>
+    What makes the deploy "a Terraform apply" instead of an ECS side channel?
+    <details><summary>Answer</summary><p>The BFF image tag is passed to Terraform as <code>image_tag</code>, so Terraform creates the task definition for that artifact.</p></details>
+  </li>
+  <li>
+    Why are immutable ECR tags useful when the tag is a git SHA?
+    <details><summary>Answer</summary><p>A SHA tag should identify one artifact. Immutability prevents accidentally replacing the image behind an already-used tag.</p></details>
+  </li>
+  <li>
+    Which script-level guardrail prevents GitHub from using a local AWS profile?
+    <details><summary>Answer</summary><p>Each walking-skeleton script refuses <code>GITHUB_ACTIONS=true</code> with <code>USE_AWS_PROFILE=true</code>.</p></details>
+  </li>
+  <li>
+    If the API smoke passes but the web marker fails, where would you look first?
+    <details><summary>Answer</summary><p>Look at the web build, S3 sync, cache headers, CloudFront invalidation, and whether the expected bundle was actually referenced by the root HTML.</p></details>
+  </li>
+</ol>
+
+<div class="source">
+  <strong>Go deeper:</strong> <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/deployment-circuit-breaker.html">AWS ECS deployment circuit breaker</a> -
+  read this before relying on rollback behavior or changing ECS deployment settings.
+</div>
+
+<nav class="lessons">
+  <a href="./0005-iam-trust-permissions-and-oidc-fix.html">Previous lesson</a>
+  <a href="./0007-vpcs-and-cidr-blocks.html">Next lesson</a>
+</nav>
+<p><a href="../cheat-sheet.md">Cheat sheet</a> - <a href="../glossary.md">Glossary</a></p>
+
+<footer class="follow-up">
+  Questions? Run <code>/teach-me conquer-thoughts-aws-terraform</code> - your tutor remembers where you left off.
+</footer>
+
+</body>
+</html>

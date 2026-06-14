@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 0005 - IAM Trust, Permissions, and the OIDC Fix</title>
+<style>
+  :root { --ink: #1b1b18; --paper: #fdfcf7; --accent: #7a2e12; --muted: #6f6b63; --line: #ded8c8; --code: #f3efe3; }
+  body { font-family: Georgia, "Times New Roman", serif; color: var(--ink); background: var(--paper); max-width: 39rem; margin: 0 auto; padding: 3rem 1.5rem 5rem; line-height: 1.65; font-size: 1.05rem; }
+  h1 { font-size: 1.9rem; line-height: 1.2; margin-bottom: 0.25rem; }
+  h2 { font-size: 1.25rem; margin-top: 2.4rem; }
+  a { color: var(--accent); }
+  .meta { color: var(--muted); font-size: 0.9rem; margin-bottom: 2rem; }
+  .mission { font-style: italic; color: var(--muted); }
+  .objective { border-left: 3px solid var(--accent); padding: 0.65rem 1rem; margin: 2rem 0; background: #faf6ea; }
+  code, pre { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.86em; }
+  pre { background: var(--code); padding: 1rem; overflow-x: auto; line-height: 1.45; border: 1px solid var(--line); }
+  table { border-collapse: collapse; width: 100%; font-size: 0.95rem; }
+  th, td { border-bottom: 1px solid var(--line); padding: 0.45rem 0.3rem; vertical-align: top; }
+  th { text-align: left; }
+  figure { margin: 2rem 0; }
+  figcaption { color: var(--muted); font-size: 0.85rem; margin-top: 0.5rem; }
+  .quiz li { margin-bottom: 1.2rem; }
+  .reading li { margin-bottom: 0.7rem; }
+  details summary { cursor: pointer; color: var(--accent); }
+  .source { background: #f4efe2; padding: 1rem 1.25rem; margin: 2rem 0; border: 1px solid var(--line); }
+  nav.lessons { display: flex; justify-content: space-between; gap: 1rem; font-size: 0.9rem; margin-top: 2rem; }
+  footer { margin-top: 3rem; padding-top: 1.5rem; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.9rem; }
+  @media print { body { max-width: none; padding: 0; } details summary { display: none; } nav.lessons, .follow-up { display: none; } pre, table, details { page-break-inside: avoid; } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>IAM Trust, Permissions, and the OIDC Fix</h1>
+  <p class="meta">Lesson 0005 - Conquer Thoughts AWS/Terraform - 2026-06-14</p>
+  <p class="mission">Part of your mission to build a durable mental model of the Conquer Thoughts production walking skeleton so you can explain, debug, and safely extend the AWS/Terraform/GitHub Actions rail.</p>
+</header>
+
+<div class="objective">
+  <strong>After this lesson you'll be able to</strong> diagnose why `sts:AssumeRoleWithWebIdentity` failed and why widening permissions would not fix it.
+</div>
+
+<h2>Concrete example: the failure happened before Terraform</h2>
+<p>
+The first GitHub deploy attempt repeated "Assuming role with OIDC" and then failed with
+<code>Not authorized to perform sts:AssumeRoleWithWebIdentity</code>. That means the workflow
+did not yet have AWS credentials. The failure was at the role entrance, before Terraform,
+ECR, S3, CloudFront, or ECS permissions mattered.
+</p>
+
+<p>
+This is the most important distinction in the whole OIDC story:
+</p>
+
+<pre>Trust policy:
+  Who is allowed to enter the role?
+
+Permissions policy:
+  Once inside the role, what AWS actions may it perform?</pre>
+
+<h2>Concrete example: the trust policy was too clever</h2>
+<p>
+The project briefly tried to check separate GitHub token conditions for repository and
+repository owner alongside the main-branch subject. The repair removed the extra owner/repo
+conditions and kept the narrow, documented shape that the workflow needed:
+</p>
+
+<pre>"token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+"token.actions.githubusercontent.com:sub" = "repo:citypaul/conquer-thoughts:ref:refs/heads/main"</pre>
+
+<p>
+AWS's GitHub OIDC role guidance says the <code>sub</code> condition is the core limiter for
+specific GitHub organizations, repositories, and branches, and AWS validates that a GitHub
+OIDC trust does not omit it or leave it as only a wildcard
+(<a href="https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_create_for-idp_oidc.html">AWS GitHub OIDC role docs</a>).
+GitHub's AWS guide also uses <code>aud</code> plus <code>sub</code> in its AWS trust examples and
+notes that workflows using environments have a different subject format
+(<a href="https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-aws">GitHub OIDC in AWS docs</a>).
+</p>
+
+<h2>The principle</h2>
+<p>
+When <code>AssumeRoleWithWebIdentity</code> fails, do not widen the role's service permissions.
+The workflow never got inside the role. Fix the front-door trust so it matches the identity
+token the workflow actually emits, then rerun the failed deploy. Old failed runs do not heal
+after a role trust change because the OIDC step already exited.
+</p>
+
+<figure>
+<pre>Wrong debugging path:
+  OIDC failure
+    -> add more ecs/s3/ecr/cloudfront permissions
+    -> still fails, now less safe
+
+Right debugging path:
+  OIDC failure
+    -> inspect workflow trigger and token subject
+    -> inspect IAM role trust
+    -> apply bootstrap trust fix
+    -> rerun deploy</pre>
+  <figcaption>A trust failure is a door problem, not an after-entry permission problem.</figcaption>
+</figure>
+
+<h2>Plan role versus deploy role</h2>
+<table>
+  <thead>
+    <tr><th>Role</th><th>Trust shape</th><th>Permissions intent</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Deploy role</td>
+      <td>Exact main-branch subject.</td>
+      <td>Apply production infrastructure, push/read images, publish assets, run smoke checks.</td>
+    </tr>
+    <tr>
+      <td>Plan role</td>
+      <td>Defaults to the same main-branch subject until PR planning is deliberately designed.</td>
+      <td>Read Terraform state and AWS account metadata; lock state while planning.</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>
+The plan role default is intentionally conservative. Pull request planning is useful, but it
+widens who can read AWS metadata and state. That should be a deliberate workflow design, not
+an accidental wildcard in the first production deploy.
+</p>
+
+<h2>Future subject changes to treat as security changes</h2>
+<table>
+  <thead>
+    <tr><th>Workflow change</th><th>OIDC consequence</th><th>Review question</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Add GitHub environment</td>
+      <td>Subject becomes environment-shaped.</td>
+      <td>Are environment branch/tag protections configured and reflected in IAM trust?</td>
+    </tr>
+    <tr>
+      <td>Allow tags</td>
+      <td>Subject can become tag-shaped.</td>
+      <td>Which tags are allowed to deploy, and why?</td>
+    </tr>
+    <tr>
+      <td>Allow pull requests to plan</td>
+      <td>Subject must include PR-safe patterns.</td>
+      <td>What state and account metadata may PRs read?</td>
+    </tr>
+    <tr>
+      <td>Use reusable workflow</td>
+      <td>Additional workflow identity claims may matter.</td>
+      <td>Which workflow file is trusted to request credentials?</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>Reading and resources</h2>
+<ul class="reading">
+  <li><a href="https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_create_for-idp_oidc.html">AWS: Create a role for OIDC federation</a> - the canonical source for the GitHub OIDC trust policy shape.</li>
+  <li><a href="https://docs.github.com/en/actions/reference/security/oidc">GitHub OIDC reference</a> - use this before changing branches, tags, environments, pull request planning, or reusable workflows.</li>
+  <li><a href="https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies.html">AWS IAM policies and permissions</a> - use this for the difference between identity policies, resource policies, and role trust policies.</li>
+  <li><a href="https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_evaluation-logic.html">AWS IAM policy evaluation logic</a> - use this after STS succeeds and you need to understand why an AWS API call is allowed or denied.</li>
+  <li><a href="https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_iam-condition-keys.html#condition-keys-wif">AWS OIDC federation condition keys</a> - use this to check which web-identity claims can be referenced in IAM conditions.</li>
+</ul>
+
+<h2>Check yourself</h2>
+<ol class="quiz">
+  <li>
+    A deploy log fails at <code>AssumeRoleWithWebIdentity</code>. What category of IAM problem is it?
+    <details><summary>Answer</summary><p>A trust policy problem. The workflow has not entered the role yet.</p></details>
+  </li>
+  <li>
+    Why would adding <code>s3:*</code> or <code>ecs:*</code> not fix that failure?
+    <details><summary>Answer</summary><p>Those are after-entry permissions. They matter only after STS has successfully returned temporary role credentials.</p></details>
+  </li>
+  <li>
+    What does the current deploy <code>sub</code> value lock down?
+    <details><summary>Answer</summary><p>The repository and branch identity: <code>citypaul/conquer-thoughts</code> on <code>refs/heads/main</code>.</p></details>
+  </li>
+  <li>
+    Why is adding a GitHub Environment not a harmless YAML-only change?
+    <details><summary>Answer</summary><p>It changes the OIDC subject shape. The IAM trust policy and environment protection rules must be reviewed together.</p></details>
+  </li>
+  <li>
+    What should be your first debug artifact: Terraform plan output or the role trust policy?
+    <details><summary>Answer</summary><p>The role trust policy, because a failed role assumption means Terraform never got AWS credentials to plan or apply.</p></details>
+  </li>
+</ol>
+
+<div class="source">
+  <strong>Go deeper:</strong> <a href="https://docs.github.com/en/actions/reference/security/oidc">GitHub OIDC reference</a> -
+  read the subject-claim examples before changing workflow triggers, environments, tags, or PR credential behavior.
+</div>
+
+<nav class="lessons">
+  <a href="./0004-github-oidc-to-aws.html">Previous lesson</a>
+  <a href="./0006-deployment-rail-provenance-and-guardrails.html">Next lesson</a>
+</nav>
+<p><a href="../cheat-sheet.md">Cheat sheet</a> - <a href="../glossary.md">Glossary</a></p>
+
+<footer class="follow-up">
+  Questions? Run <code>/teach-me conquer-thoughts-aws-terraform</code> - your tutor remembers where you left off.
+</footer>
+
+</body>
+</html>
